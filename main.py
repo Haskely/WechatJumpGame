@@ -1,10 +1,22 @@
 import threading
 from time import sleep
+from tkinter.messagebox import NO
 import scrcpy
 import cv2
 import numpy as np
 
-def matchTemplate(ori_img, template):
+pos_T = tuple[float,float]
+
+def matchTemplate(ori_img:np.ndarray, template:np.ndarray) -> tuple[float,pos_T]:
+    """模板匹配方法进行目标位置检测
+
+    Args:
+        ori_img (np.ndarray): 整张图片，高x宽x3(bgr)
+        template (np.ndarray): 模板，高x宽x3(bgr)，其中bgr全为0的点默认为忽略mask
+
+    Returns:
+        tuple[float,pos_T]: 可信度与匹配目标的左上角坐标
+    """
     res = cv2.matchTemplate(ori_img, template, cv2.TM_SQDIFF_NORMED,
                             None, (template != 0).all(-1).astype('uint8'))
     confidence = 1 - res.min()/res.mean()
@@ -12,10 +24,16 @@ def matchTemplate(ori_img, template):
     return confidence, top_left
 
 
-checker_templ = cv2.imread('checker.png')
+checker_templ = cv2.imread('checker.png') # 棋子匹配模板图像
+def get_checker_pos(frame:np.ndarray) -> pos_T:
+    """获取小棋子的落脚点
 
+    Args:
+        frame (np.ndarray): 某一帧画面,高x宽x3(bgr)
 
-def get_checker_pos(frame):
+    Returns:
+        pos_T: 小棋子的落脚点坐标(x,y)，x横向，y纵向；若没有小棋子则返回None
+    """
     confidence, top_left = matchTemplate(frame, checker_templ)
     if (confidence > 0.87):
         h, w = checker_templ.shape[:2]
@@ -26,10 +44,16 @@ def get_checker_pos(frame):
         return None
 
 
-button_templ = cv2.imread('button.png')
+button_templ = cv2.imread('button.png') # 按钮匹配模板图像
+def get_button_pos(frame:np.ndarray) -> pos_T:
+    """获取开始游戏按钮或重新开始按钮的中间坐标
 
+    Args:
+        frame (np.ndarray): 某一帧画面,高x宽x3(bgr)
 
-def get_button_pos(frame):
+    Returns:
+        pos_T: 开始游戏按钮或重新开始按钮的中间坐标(x,y)，x横向，y纵向；若没有按钮则返回None
+    """
     confidence, top_left = matchTemplate(frame, button_templ)
     if (confidence > 0.95):
         h, w = button_templ.shape[:2]
@@ -40,7 +64,16 @@ def get_button_pos(frame):
         return None
 
 
-def get_boxcenter_poses(frame: np.ndarray, checker_pos: tuple):
+def get_boxcenter_poses(frame: np.ndarray, checker_pos: pos_T) -> tuple[pos_T,pos_T]:
+    """获取游戏中落脚点的中心坐标
+
+    Args:
+        frame (np.ndarray): 某一帧画面,高x宽x3(bgr)
+        checker_pos (pos_T): 当前帧小棋子的落脚点
+
+    Returns:
+        tuple[pos_T,pos_T]: 目标落脚点的中心坐标和当前落脚点的中心坐标
+    """
     top_y = None
     target_loc = None
 
@@ -54,7 +87,7 @@ def get_boxcenter_poses(frame: np.ndarray, checker_pos: tuple):
 
     row_start = 200
     c_sen = 25
-    
+
     for i in range(row_start, frame.shape[0]):
         h = frame[i, b:e]
         xs, ys = np.where((h - h[0])**2 > c_sen)
@@ -74,57 +107,74 @@ def get_boxcenter_poses(frame: np.ndarray, checker_pos: tuple):
     return target_loc, source_loc
 
 
-def distance(pos1, pos2):
+def distance(pos1:pos_T, pos2:pos_T) -> float:
+    """计算欧氏距离
+
+    Args:
+        pos1 (pos_T): 坐标1
+        pos2 (pos_T): 坐标2
+
+    Returns:
+        float: 两个坐标的欧氏距离
+    """
     return np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
 
 
-def press(pos, sec):
+def press(pos:pos_T, sec:float) -> None:
+    """长按屏幕
+
+    Args:
+        pos (pos_T): 按压位置
+        sec (float): 按压时间，单位秒
+    """
     phone.control.touch(x=pos[0], y=pos[1], action=scrcpy.ACTION_DOWN)
     sleep(sec)
     phone.control.touch(x=pos[0], y=pos[1], action=scrcpy.ACTION_UP)
     # threading.Timer(sec, phone.control.touch,kwargs=dict(x=pos[0],y=pos[1],action = scrcpy.ACTION_UP))
 
 
-errorN = 0
-k = 4.0e-3
+errorN = 0 # 既没有检测到小跳棋也没有检测到开始游戏按钮的次数，超过三次停止程序
+k = 4.01e-3 # 比例系数 = 按压时间 / 欧氏距离 
 # lr = 1e-6
-thinkN = 0
-sameN = 0
-pre_frame = None
-ready2think = False
 
-diff = 0
+thinkN = 0 # 电脑玩家思考的次数 % 1e7
+
+sameN = 0 # 判断当前画面是否已经静止
+diff = 0 # 判断当前画面是否已经静止
+pre_frame = None # 判断当前画面是否已经静止
+
+ready2action = False # 是否准备好进行操作
 
 checker_pos = None
 button_pos = None
 tar_box_pos = None
 src_box_pos = None
 
+def think(frame:np.ndarray) -> None:
+    """电脑玩家处理一帧画面
 
-def think(frame):
+    Args:
+        frame (np.ndarray): 某一帧画面,高x宽x3(bgr)
+    """
     if frame is None:
         return
-    global diff, thinkN, sameN, pre_frame, ready2think, errorN, checker_pos, button_pos, tar_box_pos, src_box_pos
+    global diff, thinkN, sameN, pre_frame, ready2action, errorN, checker_pos, button_pos, tar_box_pos, src_box_pos
 
-    thinkN = (thinkN+1) % 100
-    if not ready2think:
+    thinkN = (thinkN+1) % 1e7
+    if not ready2action:
         if sameN < 5:
             diff = (frame != pre_frame).sum() / \
                 frame.size if pre_frame is not None else float('inf')
-            if diff < 0.05: # 95%像素一致
+            if diff < 0.05:  # 95%像素一致
                 sameN += 1
         else:
             # 画面已经静止
-            ready2think = True
+            ready2action = True
             sameN = 0
 
-    # cv2.imshow('frame',frame)
-    # cv2.waitKey(int(1000 / phone.max_fps))
-    # cv2.imshow('diff',frame - pre_frame)
-    # cv2.waitKey(int(1000 / phone.max_fps))
         sleep(0.1)
     else:
-        ready2think = False
+        ready2action = False
         checker_pos = get_checker_pos(frame)
         if checker_pos:
             # 计算距离并跳跃
@@ -158,9 +208,16 @@ def think(frame):
 
     pre_frame = frame
 
+
 pre_thinkN = 0
 
-def show_frame(frame):
+
+def show_frame(frame:np.ndarray) -> None:
+    """绘制必要信息并展示一帧画面
+
+    Args:
+        frame (np.ndarray): 某一帧画面,高x宽x3(bgr)
+    """
     if frame is None:
         return
 
@@ -172,14 +229,14 @@ def show_frame(frame):
             cv2.putText(frame2show, t, (pos[0], pos[1]+i*20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
     putText(
-        f'diff = {diff:g}\nthinkN = {thinkN}\nsameN = {sameN}\nready2think = {ready2think}', (5, 50))
+        f'diff = {diff:g}\nthinkN = {thinkN}\nsameN = {sameN}\nready2think = {ready2action}', (5, 50))
 
     def int_pos(pos):
         return round(pos[0]), round(pos[1])
-    
+
     cv2.circle(frame2show, int_pos(cen_loc),
-                2, (255,255, 0), -1)  # 中心点
-        
+               2, (255, 255, 0), -1)  # 中心点
+
     if checker_pos is not None:
         cv2.circle(frame2show, int_pos(checker_pos),
                    5, (100, 0, 255), -1)  # 棋子的落脚点
@@ -193,7 +250,7 @@ def show_frame(frame):
 
     if tar_box_pos is not None:
         cv2.circle(frame2show, int_pos(tar_box_pos),
-                   5, (0,0,0), -1)  # 目标方块的中心点
+                   5, (0, 0, 0), -1)  # 目标方块的中心点
         if checker_pos is not None:
             cv2.line(frame2show, int_pos(checker_pos), int_pos(
                 tar_box_pos), (0, 255, 255), 2)  # 目标方块中心点 与 当前方块中心点 连线
@@ -223,8 +280,6 @@ phone = scrcpy.Client(
     max_width=800,
     bitrate=8000000,
     max_fps=10,
-    # stay_awake=True,
-    # lock_screen_orientation=False,
 )
 
 cen_loc = None
@@ -234,7 +289,9 @@ def on_init():
         f"拿到手机!\n\tDevice Name:{phone.device_name}\n\tResolution:{phone.resolution}")
     cen_loc = (phone.resolution[0]/2, phone.resolution[1]/2 + 5)
 
+
 phone.add_listener(scrcpy.EVENT_INIT, on_init)
+
 # def on_frame(frame):
 #     pass
 # phone.add_listener(scrcpy.EVENT_FRAME,on_frame)
@@ -245,7 +302,6 @@ running = True
 
 
 def run():
-    # 新设想，只调用phone.last_frame,可以避免多线程
     while running:
         think(phone.last_frame)
 
@@ -263,6 +319,7 @@ def stop():
     global running
     phone.stop()
     running = False
+
 
 while running:
     if input('输入 end 停止\n') == 'end':
