@@ -1,12 +1,16 @@
-import threading
-from time import sleep
-import scrcpy
-import cv2
 import numpy as np
+import cv2
+import scrcpy
+from time import sleep
+import threading
+import ctypes
+# Set DPI Awareness  (Windows 10 and 8) https://stackoverflow.com/questions/44398075/can-dpi-scaling-be-enabled-disabled-programmatically-on-a-per-session-basis
+errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
-pos_T = tuple[float,float]
+POS_T = tuple[float, float]
 
-def matchTemplate(ori_img:np.ndarray, template:np.ndarray) -> tuple[float,pos_T]:
+
+def matchTemplate(ori_img: np.ndarray, template: np.ndarray) -> tuple[float, POS_T]:
     """模板匹配方法进行目标位置检测
 
     Args:
@@ -23,8 +27,8 @@ def matchTemplate(ori_img:np.ndarray, template:np.ndarray) -> tuple[float,pos_T]
     return confidence, top_left
 
 
-checker_templ = cv2.imread('checker.png') # 棋子匹配模板图像
-def get_checker_pos(frame:np.ndarray) -> pos_T:
+checker_templ = cv2.imread('checker.png')  # 棋子匹配模板图像
+def get_checker_pos(frame: np.ndarray) -> POS_T:
     """获取小棋子的落脚点
 
     Args:
@@ -39,12 +43,12 @@ def get_checker_pos(frame:np.ndarray) -> pos_T:
         checker_pos = (top_left[0] + w/2, top_left[1] + h - w*0.577/2)
         return checker_pos
     else:
-        print(f"没有探测到小跳棋! 因为信心度为{confidence:g} <= 0.87")
+        # print(f"没有探测到小跳棋! 因为信心度为{confidence:g} <= 0.87")
         return None
 
 
-button_templ = cv2.imread('button.png') # 按钮匹配模板图像
-def get_button_pos(frame:np.ndarray) -> pos_T:
+button_templ = cv2.imread('button.png')  # 按钮匹配模板图像
+def get_button_pos(frame: np.ndarray) -> POS_T:
     """获取开始游戏按钮或重新开始按钮的中间坐标
 
     Args:
@@ -59,11 +63,12 @@ def get_button_pos(frame:np.ndarray) -> pos_T:
         button_pos = (top_left[0] + w/2, top_left[1] + h/2)
         return button_pos
     else:
-        print(f"没有探测到按钮! 因为信心度为{confidence:g} <= 0.95")
+        # print(f"没有探测到按钮! 因为信心度为{confidence:g} <= 0.95")
         return None
 
 
-def get_boxcenter_poses(frame: np.ndarray, checker_pos: pos_T) -> tuple[pos_T,pos_T]:
+target_top_line = None
+def get_platcenter_poses(frame: np.ndarray, checker_pos: POS_T) -> tuple[POS_T, POS_T]:
     """获取游戏中落脚点的中心坐标
 
     Args:
@@ -76,20 +81,20 @@ def get_boxcenter_poses(frame: np.ndarray, checker_pos: pos_T) -> tuple[pos_T,po
     top_y = None
     target_loc = None
 
-    # 避免把棋子顶端当作方块顶端
-    if checker_pos[0] < frame.shape[1] / 2:  # 如果棋子在屏幕左边，目标方块一定在棋子右边
+    # 避免把棋子顶端当作平台顶端
+    if checker_pos[0] < frame.shape[1] / 2:  # 如果棋子在屏幕左边，目标平台一定在棋子右边
         b = round(checker_pos[0] + checker_templ.shape[1] / 2)
         e = frame.shape[1]
-    else:  # 如果棋子在屏幕右边，目标方块一定在棋子左边
+    else:  # 如果棋子在屏幕右边，目标平台一定在棋子左边
         b = 0
         e = round(checker_pos[0] - checker_templ.shape[1] / 2)
 
     row_start = 200
-    c_sen = 25
-
+    c_sen = 100
+    global target_top_line
     for i in range(row_start, frame.shape[0]):
         h = frame[i, b:e]
-        xs, ys = np.where((h - h[0])**2 > c_sen)
+        xs = np.where(((h - h[0])**2).sum(-1) > c_sen)[0]
         if xs.shape[0]:
             top_y = i
             x = np.mean(xs) + b
@@ -97,6 +102,7 @@ def get_boxcenter_poses(frame: np.ndarray, checker_pos: pos_T) -> tuple[pos_T,po
                 abs(top_y - cen_loc[1])  # 利用绝对中心找到偏移量
             y = top_y + abs(det_y)
             target_loc = (x, y)
+            target_top_line = ((xs[0] + b, top_y), (xs[-1] + b, top_y))
             break
 
     # 计算上一次的跳跃目标
@@ -106,7 +112,7 @@ def get_boxcenter_poses(frame: np.ndarray, checker_pos: pos_T) -> tuple[pos_T,po
     return target_loc, source_loc
 
 
-def distance(pos1:pos_T, pos2:pos_T) -> float:
+def distance(pos1: POS_T, pos2: POS_T) -> float:
     """计算欧氏距离
 
     Args:
@@ -119,7 +125,7 @@ def distance(pos1:pos_T, pos2:pos_T) -> float:
     return np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
 
 
-def press(pos:pos_T, sec:float) -> None:
+def press(pos: POS_T, sec: float) -> None:
     """长按屏幕
 
     Args:
@@ -132,24 +138,37 @@ def press(pos:pos_T, sec:float) -> None:
     # threading.Timer(sec, phone.control.touch,kwargs=dict(x=pos[0],y=pos[1],action = scrcpy.ACTION_UP))
 
 
-errorN = 0 # 既没有检测到小跳棋也没有检测到开始游戏按钮的次数，超过三次停止程序
-k = 4.01e-3 # 比例系数 = 按压时间 / 欧氏距离 
-# lr = 1e-6
+errorN = 0  # 既没有检测到小跳棋也没有检测到开始游戏按钮的次数，超过三次停止程序
+k = 4.05e-3  # 比例系数 = 按压时间 / 欧氏距离
 
-thinkN = 0 # 电脑玩家思考的次数 % 1e7
-
-sameN = 0 # 判断当前画面是否已经静止
-diff = 0 # 判断当前画面是否已经静止
-pre_frame = None # 判断当前画面是否已经静止
-
-ready2action = False # 是否准备好进行操作
+thinkN = 0  # 电脑玩家思考的次数 % 1e7
 
 checker_pos = None
 button_pos = None
-tar_box_pos = None
-src_box_pos = None
+tar_plat_pos = None
+src_plat_pos = None
 
-def think(frame:np.ndarray) -> None:
+sameN = 0  # 判断当前画面是否已经静止
+diff = 0  # 判断当前画面是否已经静止
+pre_checker_pos = None  # 判断当前画面是否已经静止
+def ready2action(checker_pos):
+    global sameN, pre_checker_pos, diff
+    if sameN >= show_FPS // 2:
+        sameN = 0
+        pre_checker_pos = None
+        res = True
+    else:
+        res = False
+        if pre_checker_pos is not None:
+            diff = distance(pre_checker_pos, checker_pos)
+            if diff < 1e-5:
+                sameN += 1
+        pre_checker_pos = checker_pos
+    return res
+
+
+last_action_frame = None
+def think(frame: np.ndarray) -> None:
     """电脑玩家处理一帧画面
 
     Args:
@@ -157,61 +176,38 @@ def think(frame:np.ndarray) -> None:
     """
     if frame is None:
         return
-    global diff, thinkN, sameN, pre_frame, ready2action, errorN, checker_pos, button_pos, tar_box_pos, src_box_pos
+    global thinkN, errorN, checker_pos, button_pos, tar_plat_pos, src_plat_pos
 
-    thinkN = (thinkN+1) % 1e7
-    if not ready2action:
-        if sameN < 5:
-            diff = (frame != pre_frame).sum() / \
-                frame.size if pre_frame is not None else float('inf')
-            if diff < 0.05:  # 95%像素一致
-                sameN += 1
-        else:
-            # 画面已经静止
-            ready2action = True
-            sameN = 0
+    thinkN += 1
+    checker_pos = get_checker_pos(frame)
+    if checker_pos:
 
-        sleep(0.1)
-    else:
-        ready2action = False
-        checker_pos = get_checker_pos(frame)
-        if checker_pos:
+        if ready2action(checker_pos):
             # 计算距离并跳跃
-            tar_box_pos, src_box_pos = get_boxcenter_poses(frame, checker_pos)
+            tar_plat_pos, src_plat_pos = get_platcenter_poses(
+                frame, checker_pos)
 
-            err_dis = distance(checker_pos, src_box_pos) * \
-                (-1.0 if checker_pos[1] < src_box_pos[1] else 1.0)
-            # k = k + err_dis*lr
-            # print(f'err_dis={err_dis:.2g}\nlr={lr:g}\n{k:g}=k+{err_dis*lr:g}\n')
+            press((frame.shape[1]/2, frame.shape[0]/2),
+                  distance(checker_pos, tar_plat_pos)*k)
 
-            dis = distance(checker_pos, tar_box_pos)
-            sec = dis*k
-            print(f'err_dis={err_dis:g}\nk={k:g}\ndis={dis:g}\nsec={sec:g}\n')
-            press((frame.shape[1]/2, frame.shape[0]/2), sec)
+            checker_pos, tar_plat_pos, src_plat_pos = None, None, None
 
-        else:
-            button_pos = get_button_pos(frame)
-            if button_pos:
-                # 点击按钮开始游戏
-                press(button_pos, 0.2)
-            else:
-                errorN += 1
-                print(f"既没有检测到小跳棋也没有检测到开始游戏按钮 x {errorN}")
-                if errorN >= 3:
-                    print("程序结束，按任意键退出~")
-                    input()
-                    stop()
+            global last_action_frame
+            last_action_frame = frame
+    else:
+        button_pos = get_button_pos(frame)
+        if button_pos:
+            # 点击按钮开始或重新开始游戏
+            press(button_pos, 0.2)
+            button_pos = None
 
-        sleep(0.5)
-        checker_pos, button_pos, tar_box_pos, src_box_pos = None, None, None, None
-
-    pre_frame = frame
+            if last_action_frame is not None:
+                cv2.imwrite('last_action_frame.png', last_action_frame)
 
 
-pre_thinkN = 0
-
-
-def show_frame(frame:np.ndarray) -> None:
+lastsc_thinkN = 0
+showN = 0
+def show_frame(frame: np.ndarray) -> None:
     """绘制必要信息并展示一帧画面
 
     Args:
@@ -219,16 +215,27 @@ def show_frame(frame:np.ndarray) -> None:
     """
     if frame is None:
         return
-
+    global showN
+    showN += 1
     frame2show = frame.copy()
 
-    def putText(text, pos):
+    def putText(text, pos, color=(71, 99, 255)):
         texts = text.split('\n')
         for i, t in enumerate(texts):
-            cv2.putText(frame2show, t, (pos[0], pos[1]+i*20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-    putText(
-        f'diff = {diff:g}\nthinkN = {thinkN}\nsameN = {sameN}\nready2think = {ready2action}', (5, 50))
+            cv2.putText(frame2show, t, (pos[0], pos[1]+i*15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    info = {
+        'frame_FPS': frame_FPS,
+        'think_FPS': think_FPS,
+        'show_FPS': show_FPS,
+        'frameN': frameN,
+        'thinkN': thinkN,
+        'showN': showN,
+        'diff': diff,
+        'sameN': sameN,
+    }
+    putText('\n'.join([f'{key}={val:g}' for key,
+            val in info.items()]), (10, 20), color=(255, 191, 0))
 
     def int_pos(pos):
         return round(pos[0]), round(pos[1])
@@ -238,7 +245,7 @@ def show_frame(frame:np.ndarray) -> None:
 
     if checker_pos is not None:
         cv2.circle(frame2show, int_pos(checker_pos),
-                   5, (100, 0, 255), -1)  # 棋子的落脚点
+                   3, (100, 0, 255), -1)  # 棋子的落脚点
 
     if button_pos is not None:
         h, w = button_templ.shape[:2]
@@ -246,39 +253,44 @@ def show_frame(frame:np.ndarray) -> None:
         bottom_right = (button_pos[0] + w/2, button_pos[1] + h/2)
         cv2.rectangle(frame2show, int_pos(top_left),
                       int_pos(bottom_right), 255, 2)
-
-    if tar_box_pos is not None:
-        cv2.circle(frame2show, int_pos(tar_box_pos),
-                   5, (0, 0, 0), -1)  # 目标方块的中心点
+    if pre_checker_pos is not None:
+        cv2.circle(frame2show, int_pos(pre_checker_pos),
+                   5, (0, 100, 200), 1)  # 棋子上一帧的落脚点
+    if target_top_line is not None:
+        cv2.line(frame2show, int_pos(target_top_line[0]), int_pos(
+            target_top_line[1]), (0, 0, 200), 2)  # 平台扫描起始线
+    if tar_plat_pos is not None:
+        cv2.circle(frame2show, int_pos(tar_plat_pos),
+                   5, (0, 0, 0), -1)  # 目标平台的中心点
         if checker_pos is not None:
             cv2.line(frame2show, int_pos(checker_pos), int_pos(
-                tar_box_pos), (0, 255, 255), 2)  # 目标方块中心点 与 当前方块中心点 连线
+                tar_plat_pos), (0, 255, 255), 2)  # 目标平台中心点 与 当前平台中心点 连线
 
             def midpoint(p1, p2):
                 return (p1[0]+p2[0])/2, (p1[1]+p2[1])/2
-            line_mid = midpoint(checker_pos, tar_box_pos)
-            dis = distance(checker_pos, tar_box_pos)
+            line_mid = midpoint(checker_pos, tar_plat_pos)
+            dis = distance(checker_pos, tar_plat_pos)
             sec = dis*k
             putText(f'dis={dis:.3g}\nsec={sec:.3g} s\nk={k:.3g}',
                     int_pos((line_mid[0], line_mid[1] + 10)))
 
-            global pre_thinkN
-            if pre_thinkN != thinkN:
+            global lastsc_thinkN
+            if lastsc_thinkN != thinkN:
                 cv2.imwrite('last_info_sc.png', frame2show)
-                pre_thinkN = thinkN
+                lastsc_thinkN = thinkN
 
-    if src_box_pos is not None:
-        cv2.circle(frame2show, int_pos(src_box_pos),
-                   2, (0, 255, 255), -1)  # 当前方块的中心点
+    if src_plat_pos is not None:
+        cv2.circle(frame2show, int_pos(src_plat_pos),
+                   2, (0, 255, 255), -1)  # 当前平台的中心点
 
-    cv2.imshow('viz', frame2show)
+    cv2.imshow(u'WechatJumpGame', frame2show)
     cv2.waitKey(int(1000 / phone.max_fps))
 
 
 phone = scrcpy.Client(
     max_width=800,
     bitrate=8000000,
-    max_fps=10,
+    max_fps=60,
 )
 
 cen_loc = None
@@ -291,35 +303,59 @@ def on_init():
 
 phone.add_listener(scrcpy.EVENT_INIT, on_init)
 
-# def on_frame(frame):
-#     pass
-# phone.add_listener(scrcpy.EVENT_FRAME,on_frame)
+FPS_lock = threading.Lock()
+frameN = 0
+def on_frame(frame):
+    global frameN
+    with FPS_lock:
+        frameN += 1
+
+
+phone.add_listener(scrcpy.EVENT_FRAME, on_frame)
 
 phone.start(threaded=True)
 
-running = True
+playing = True
 
 
-def run():
-    while running:
+def play():
+    while playing:
         think(phone.last_frame)
 
 
 def show():
-    while running:
+    while playing:
         show_frame(phone.last_frame)
 
 
-threading.Thread(target=run).start()
+frame_FPS = 0
+think_FPS = 0
+show_FPS = 0
+def cal_fps():
+    global frame_FPS, frameN, think_FPS, thinkN, show_FPS, showN
+    while playing:
+        with FPS_lock:
+            frameN = 0
+            thinkN = 0
+            showN = 0
+        sleep(1.0)
+        frame_FPS = frameN
+        think_FPS = thinkN
+        show_FPS = showN
+
+
+threading.Thread(target=play).start()
 threading.Thread(target=show).start()
+
+threading.Thread(target=cal_fps).start()
 
 
 def stop():
-    global running
+    global playing
     phone.stop()
-    running = False
+    playing = False
 
 
-while running:
+while playing:
     if input('输入 end 停止\n') == 'end':
         stop()
