@@ -1,6 +1,5 @@
 import threading
 from time import sleep
-from tkinter.messagebox import NO
 import scrcpy
 import cv2
 import numpy as np
