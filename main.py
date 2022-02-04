@@ -5,7 +5,7 @@ from time import sleep
 import threading
 import ctypes
 # Set DPI Awareness  (Windows 10 and 8) https://stackoverflow.com/questions/44398075/can-dpi-scaling-be-enabled-disabled-programmatically-on-a-per-session-basis
-errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(1)
+errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(0)
 
 POS_T = tuple[float, float]
 
@@ -84,13 +84,13 @@ def get_platcenter_poses(frame: np.ndarray, checker_pos: POS_T) -> tuple[POS_T, 
     # 避免把棋子顶端当作平台顶端
     if checker_pos[0] < frame.shape[1] / 2:  # 如果棋子在屏幕左边，目标平台一定在棋子右边
         b = round(checker_pos[0] + checker_templ.shape[1] / 2)
-        e = frame.shape[1]
+        e = frame.shape[1] - 20
     else:  # 如果棋子在屏幕右边，目标平台一定在棋子左边
-        b = 0
+        b = 20
         e = round(checker_pos[0] - checker_templ.shape[1] / 2)
 
     row_start = 200
-    c_sen = 100
+    c_sen = 200
     global target_top_line
     for i in range(row_start, frame.shape[0]):
         h = frame[i, b:e]
@@ -153,7 +153,7 @@ diff = 0  # 判断当前画面是否已经静止
 pre_checker_pos = None  # 判断当前画面是否已经静止
 def ready2action(checker_pos):
     global sameN, pre_checker_pos, diff
-    if sameN >= show_FPS // 2:
+    if sameN >= show_FPS // 4:
         sameN = 0
         pre_checker_pos = None
         res = True
@@ -181,11 +181,10 @@ def think(frame: np.ndarray) -> None:
     thinkN += 1
     checker_pos = get_checker_pos(frame)
     if checker_pos:
-
+        tar_plat_pos, src_plat_pos = get_platcenter_poses(
+            frame, checker_pos)
         if ready2action(checker_pos):
             # 计算距离并跳跃
-            tar_plat_pos, src_plat_pos = get_platcenter_poses(
-                frame, checker_pos)
 
             press((frame.shape[1]/2, frame.shape[0]/2),
                   distance(checker_pos, tar_plat_pos)*k)
