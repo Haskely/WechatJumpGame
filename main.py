@@ -9,6 +9,7 @@ errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(0)
 
 POS_T = tuple[float, float]
 
+TAN = 0.5771 # 透视角度 tan
 
 def matchTemplate(ori_img: np.ndarray, template: np.ndarray) -> tuple[float, POS_T]:
     """模板匹配方法进行目标位置检测
@@ -40,7 +41,7 @@ def get_checker_pos(frame: np.ndarray) -> POS_T:
     confidence, top_left = matchTemplate(frame, checker_templ)
     if (confidence > 0.87):
         h, w = checker_templ.shape[:2]
-        checker_pos = (top_left[0] + w/2, top_left[1] + h - w*0.577/2)
+        checker_pos = (top_left[0] + w/2, top_left[1] + h - w*TAN/2)
         return checker_pos
     else:
         # print(f"没有探测到小跳棋! 因为信心度为{confidence:g} <= 0.87")
@@ -83,14 +84,14 @@ def get_platcenter_poses(frame: np.ndarray, checker_pos: POS_T) -> tuple[POS_T, 
 
     # 避免把棋子顶端当作平台顶端
     if checker_pos[0] < frame.shape[1] / 2:  # 如果棋子在屏幕左边，目标平台一定在棋子右边
-        b = round(checker_pos[0] + checker_templ.shape[1] / 2)
+        b = round(checker_pos[0] + checker_templ.shape[1] / 2 + 10)
         e = frame.shape[1] - 20
     else:  # 如果棋子在屏幕右边，目标平台一定在棋子左边
         b = 20
         e = round(checker_pos[0] - checker_templ.shape[1] / 2)
 
     row_start = 200
-    c_sen = 200
+    c_sen = 150
     global target_top_line
     for i in range(row_start, frame.shape[0]):
         h = frame[i, b:e]
@@ -98,7 +99,7 @@ def get_platcenter_poses(frame: np.ndarray, checker_pos: POS_T) -> tuple[POS_T, 
         if xs.shape[0]:
             top_y = i
             x = np.mean(xs) + b
-            det_y = 0.577 * abs(x - cen_loc[0]) - \
+            det_y = TAN * abs(x - cen_loc[0]) - \
                 abs(top_y - cen_loc[1])  # 利用绝对中心找到偏移量
             y = top_y + abs(det_y)
             target_loc = (x, y)
@@ -153,7 +154,7 @@ diff = 0  # 判断当前画面是否已经静止
 pre_checker_pos = None  # 判断当前画面是否已经静止
 def ready2action(checker_pos):
     global sameN, pre_checker_pos, diff
-    if sameN >= show_FPS // 4:
+    if sameN >= show_FPS // 2:
         sameN = 0
         pre_checker_pos = None
         res = True

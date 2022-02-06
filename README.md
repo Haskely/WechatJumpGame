@@ -20,4 +20,6 @@
 
 喝茶去吧
 
+(本项目已开源：[Haskely/WechatJumpGame (github.com)](https://github.com/Haskely/WechatJumpGame))
+
 ---
